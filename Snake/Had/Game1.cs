@@ -66,6 +66,20 @@ namespace Had
         private float _deathDismissTimer = 0f;
         private const float DeathDismissDuration = 0.35f;
 
+        // Victory state
+        private bool _hasWon = false;
+        private bool _takeWinSnapshot = false;
+        private RenderTarget2D? _winSnapshot = null;
+        private float _winZoomTimer = 0f;
+        private const float WinZoomDuration = 0.8f;
+        private const float WinZoomAmount = 1.12f;
+        private float _winPopTimer = 0f;
+        private const float WinPopDuration = 0.6f;
+        private float _winIdleAnimTime = 0f;
+        private float _winPhase = 0f;
+        private float _winDismissTimer = 0f;
+        private const float WinDismissDuration = 0.35f;
+
         // Particles: split into background (drawn first) and foreground
         private readonly List<Particle> _bgParticles = new();
         private readonly List<Particle> _fgParticles = new();
@@ -239,6 +253,60 @@ namespace Had
             HandleInput();
 
             var dt = (float)gameTime.ElapsedGameTime.TotalSeconds;
+
+            // if won, only advance win timers & handle input for restart
+            if (_hasWon)
+            {
+                // advance zoom timer
+                if (_winZoomTimer < WinZoomDuration)
+                {
+                    _winZoomTimer += dt;
+                    if (_winZoomTimer > WinZoomDuration) _winZoomTimer = WinZoomDuration;
+                }
+
+                // pop animation countdown
+                if (_winPopTimer > 0f)
+                {
+                    _winPopTimer -= dt;
+                    if (_winPopTimer < 0f) _winPopTimer = 0f;
+                }
+                else
+                {
+                    _winIdleAnimTime += dt;
+                }
+
+                // dismissal animation
+                if (_winDismissTimer > 0f)
+                {
+                    _winDismissTimer -= dt;
+                    if (_winDismissTimer <= 0f)
+                    {
+                        // finish dismissal -> restart
+                        _winDismissTimer = 0f;
+                        _hasWon = false;
+                        // clear snapshot
+                        if (_winSnapshot != null)
+                        {
+                            _winSnapshot.Dispose();
+                            _winSnapshot = null;
+                        }
+                        // reset game state for a fresh playthrough
+                        _score = 0;
+                        ResetGame();
+                    }
+                }
+
+                // check for space to start dismissal (only if not already dismissing)
+                var kb = Keyboard.GetState();
+                if (kb.IsKeyDown(Keys.Space) && _winDismissTimer <= 0f)
+                {
+                    _winDismissTimer = WinDismissDuration;
+                }
+
+                // while won, skip further game updates
+                base.Update(gameTime);
+                return;
+            }
 
             // if dead, only advance death timers & handle input for restart
             if (_isDead)
@@ -547,12 +615,23 @@ namespace Had
 
             if (free.Count == 0)
             {
-                // full grid (win) -> reset
-                ResetGame();
+                // full grid (win) -> Victory screen
+                StartWin();
                 return;
             }
 
             _cherry = free[_rng.Next(free.Count)];
+        }
+
+        private void StartWin()
+        {
+            _hasWon = true;
+            _takeWinSnapshot = true;
+            _winZoomTimer = 0f;
+            _winPopTimer = WinPopDuration;
+            _winIdleAnimTime = 0f;
+            _winPhase = (float)(_rng.NextDouble() * Math.PI * 2.0);
+            _winDismissTimer = 0f;
         }
 
         private void SpawnBurstAroundSnake(Point gridPos, int count)
@@ -703,6 +782,16 @@ namespace Had
                 _takeDeathSnapshot = false;
             }
 
+            // If we need to take a victory snapshot
+            if (_takeWinSnapshot)
+            {
+                _winSnapshot = new RenderTarget2D(GraphicsDevice, _graphics.PreferredBackBufferWidth, _graphics.PreferredBackBufferHeight);
+                GraphicsDevice.SetRenderTarget(_winSnapshot);
+                DrawGameScene(includeShake: false);
+                GraphicsDevice.SetRenderTarget(null);
+                _takeWinSnapshot = false;
+            }
+
             if (_isDead && _deathSnapshot != null)
             {
                 // draw zoomed snapshot
@@ -713,7 +802,6 @@ namespace Had
                 float zoom = 1f + (DeathZoomAmount - 1f) * (t);
                 // center scale
                 var center = new Vector2(_graphics.PreferredBackBufferWidth / 2f, _graphics.PreferredBackBufferHeight / 2f);
-                var destRect = new Rectangle(0, 0, _graphics.PreferredBackBufferWidth, _graphics.PreferredBackBufferHeight);
 
                 // When zooming we scale around center; draw snapshot scaled and offset
                 var scaledW = _deathSnapshot.Width * zoom;
@@ -723,6 +811,27 @@ namespace Had
 
                 // draw "You died" text with pop/idle, and instruction text
                 DrawDeathUI();
+
+                _spriteBatch.End();
+            }
+            else if (_hasWon && _winSnapshot != null)
+            {
+                // draw zoomed snapshot
+                GraphicsDevice.Clear(Color.Black);
+                _spriteBatch.Begin(samplerState: SamplerState.PointClamp);
+
+                float t = MathHelper.Clamp(_winZoomTimer / WinZoomDuration, 0f, 1f);
+                float zoom = 1f + (WinZoomAmount - 1f) * (t);
+                // center scale
+                var center = new Vector2(_graphics.PreferredBackBufferWidth / 2f, _graphics.PreferredBackBufferHeight / 2f);
+
+                var scaledW = _winSnapshot.Width * zoom;
+                var scaledH = _winSnapshot.Height * zoom;
+                var dst = new Rectangle((int)(center.X - scaledW / 2f), (int)(center.Y - scaledH / 2f), (int)scaledW, (int)scaledH);
+                _spriteBatch.Draw(_winSnapshot, dst, Color.White);
+
+                // draw victory UI
+                DrawWinUI();
 
                 _spriteBatch.End();
             }
@@ -902,6 +1011,51 @@ namespace Had
             DrawPixelText("PRESS SPACE TO PLAY AGAIN", instrPos, new Color(200, 200, 200) * alpha, scale: instrScale);
         }
 
+        private void DrawWinUI()
+        {
+            // draw "VICTORY" centered, with pop/idle and dismissal swoosh
+            float popProgress = 1f;
+            if (_winPopTimer > 0f) popProgress = 1f - (_winPopTimer / WinPopDuration);
+            popProgress = MathHelper.Clamp(popProgress, 0f, 1f);
+
+            float sinPeak = MathF.Sin(popProgress * MathF.PI);
+            float baseScale = 18f;
+            float peakScale = baseScale * 2.0f;
+            float curScaleF = baseScale + (peakScale - baseScale) * sinPeak;
+            int curScale = Math.Max(8, (int)curScaleF);
+
+            float bob = 0f;
+            if (_winPopTimer > 0f) bob = MathF.Sin(popProgress * MathF.PI) * 14f; else bob = MathF.Sin(_winIdleAnimTime * 1.1f + _winPhase) * 10f;
+
+            // dismissal swoosh progress
+            float dismiss = 0f;
+            if (_winDismissTimer > 0f) dismiss = 1f - (_winDismissTimer / WinDismissDuration);
+            dismiss = MathHelper.Clamp(dismiss, 0f, 1f);
+
+            var center = new Vector2(_graphics.PreferredBackBufferWidth * 0.5f, _graphics.PreferredBackBufferHeight * 0.4f);
+            // compute measured widths so we can center exactly
+            float mainWidth = MeasurePixelTextWidth("VICTORY", curScale);
+            var pos = center + new Vector2(dismiss * 600f, - (curScale * 2f) + bob) - new Vector2(mainWidth * 0.5f, 0);
+
+            // color and alpha reduce on dismiss
+            float alpha = 1f - dismiss;
+            var col = new Color(50, 220, 100) * alpha; // vibrant green
+
+            DrawPixelText("VICTORY", pos, col, scale: curScale);
+
+            // "KEEP PLAYING?" subtext
+            int questionScale = 4;
+            float questionWidth = MeasurePixelTextWidth("KEEP PLAYING?", questionScale);
+            var questionPos = center + new Vector2(dismiss * 600f, 70f + bob) - new Vector2(questionWidth * 0.5f, 0);
+            DrawPixelText("KEEP PLAYING?", questionPos, new Color(240, 240, 240) * alpha, scale: questionScale);
+
+            // instruction text below
+            int instrScale = 3;
+            float instrWidth = MeasurePixelTextWidth("PRESS SPACE TO PLAY AGAIN", instrScale);
+            var instrPos = center + new Vector2(dismiss * 600f, 120f + bob) - new Vector2(instrWidth * 0.5f, 0);
+            DrawPixelText("PRESS SPACE TO PLAY AGAIN", instrPos, new Color(180, 180, 180) * alpha, scale: instrScale);
+        }
+
         private float MeasurePixelTextWidth(string text, int scale)
         {
             // each glyph is 3 pixels wide + 1 pixel spacing = 4 columns
@@ -956,6 +1110,12 @@ namespace Had
             ['L'] = new byte[] { 0b100, 0b100, 0b100, 0b100, 0b111 },
             ['G'] = new byte[] { 0b111, 0b100, 0b101, 0b101, 0b111 },
             ['N'] = new byte[] { 0b101, 0b111, 0b111, 0b101, 0b101 },
+
+            // Glyphs for Victory screen
+            ['V'] = new byte[] { 0b101, 0b101, 0b101, 0b101, 0b010 },
+            ['W'] = new byte[] { 0b101, 0b101, 0b101, 0b111, 0b101 },
+            ['K'] = new byte[] { 0b101, 0b101, 0b110, 0b101, 0b101 },
+            ['?'] = new byte[] { 0b111, 0b001, 0b010, 0b000, 0b010 },
         };
 
         // Draw pixel text using the small font above
