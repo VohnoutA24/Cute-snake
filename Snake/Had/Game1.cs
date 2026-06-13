@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Microsoft.Xna.Framework;
 using Microsoft.Xna.Framework.Graphics;
@@ -26,8 +26,9 @@ namespace Had
         private double _moveTimer;
         private const double MoveInterval = 0.12; // seconds
         private bool _growNextMove;
-        // prevent multiple direction changes between move ticks
-        private bool _directionChanged = false;
+        // Input queue to store pending direction changes for snappy and bug-free controls
+        private readonly List<Point> _inputQueue = new();
+        private const int MaxInputQueueSize = 2;
 
         // Cherry (was apple)
         private Point _cherry;
@@ -153,6 +154,7 @@ namespace Had
             _snake.Add(new Point(start.X - 1, start.Y));
             _snake.Add(new Point(start.X - 2, start.Y));
             _direction = new Point(1, 0);
+            _inputQueue.Clear();
             _moveTimer = 0;
             _growNextMove = false;
 
@@ -198,6 +200,7 @@ namespace Had
             _snake.Add(new Point(start.X - 1, start.Y));
             _snake.Add(new Point(start.X - 2, start.Y));
             _direction = new Point(1, 0);
+            _inputQueue.Clear();
             _moveTimer = 0;
             _growNextMove = false;
 
@@ -398,19 +401,43 @@ namespace Had
 
         private void HandleInput()
         {
+            if (_isDead) return;
+
             var kb = Keyboard.GetState();
-            // Only allow one direction change per movement tick to avoid quick double-input causing a 180-degree reversal
-            if (!_directionChanged)
+            
+            // Check keys and determine if the player wants to queue a direction (supporting arrow keys and WASD)
+            Point? targetDir = null;
+            if (kb.IsKeyDown(Keys.Up) || kb.IsKeyDown(Keys.W)) targetDir = new Point(0, -1);
+            else if (kb.IsKeyDown(Keys.Down) || kb.IsKeyDown(Keys.S)) targetDir = new Point(0, 1);
+            else if (kb.IsKeyDown(Keys.Left) || kb.IsKeyDown(Keys.A)) targetDir = new Point(-1, 0);
+            else if (kb.IsKeyDown(Keys.Right) || kb.IsKeyDown(Keys.D)) targetDir = new Point(1, 0);
+
+            if (targetDir.HasValue)
             {
-                if (kb.IsKeyDown(Keys.Up) && _direction.Y != 1) { _direction = new Point(0, -1); _directionChanged = true; }
-                else if (kb.IsKeyDown(Keys.Down) && _direction.Y != -1) { _direction = new Point(0, 1); _directionChanged = true; }
-                else if (kb.IsKeyDown(Keys.Left) && _direction.X != 1) { _direction = new Point(-1, 0); _directionChanged = true; }
-                else if (kb.IsKeyDown(Keys.Right) && _direction.X != -1) { _direction = new Point(1, 0); _directionChanged = true; }
+                var nextDir = targetDir.Value;
+                // Get the last direction that will be applied (either from queue, or current direction)
+                Point lastDir = _inputQueue.Count > 0 ? _inputQueue[_inputQueue.Count - 1] : _direction;
+                
+                // Only queue if it's a different direction and not a 180-degree turn (which would cause self-collision)
+                if (nextDir != lastDir && !(nextDir.X == -lastDir.X && nextDir.Y == -lastDir.Y))
+                {
+                    if (_inputQueue.Count < MaxInputQueueSize)
+                    {
+                        _inputQueue.Add(nextDir);
+                    }
+                }
             }
         }
 
         private void MoveSnake()
         {
+            // Apply next queued direction if available
+            if (_inputQueue.Count > 0)
+            {
+                _direction = _inputQueue[0];
+                _inputQueue.RemoveAt(0);
+            }
+
             var head = _snake[0];
             var newHead = new Point(head.X + _direction.X, head.Y + _direction.Y);
 
@@ -440,9 +467,6 @@ namespace Had
             {
                 _growNextMove = false;
             }
-
-            // allow new direction changes after we've performed a movement
-            _directionChanged = false;
 
             // cherry collision
             if (newHead == _cherry)
